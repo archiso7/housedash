@@ -107,22 +107,15 @@ To verify audio right away with the demo, set `DEMO_CHIME=once` (plays a soft ch
 
 ## Running & Testing on Your Server (`10.52.0.4`)
 
-Because this repo is private, generate a read-only GitHub deploy key on `10.52.0.4` once, then every test cycle is just `git pull` + `docker compose up -d --build`:
-
 ```bash
-# 1. One-time setup on 10.52.0.4: create a deploy key and clone
+# 1. One-time setup on 10.52.0.4
 ssh liam@10.52.0.4
-ssh-keygen -t ed25519 -f ~/.ssh/housedash_deploy -N ""
-cat ~/.ssh/housedash_deploy.pub
-# -> Add that public key in GitHub: archiso7/housedash -> Settings -> Deploy keys (read-only)
-
 sudo mkdir -p /opt/housedash && sudo chown liam:liam /opt/housedash
-GIT_SSH_COMMAND="ssh -i ~/.ssh/housedash_deploy" git clone git@github.com:archiso7/housedash.git /opt/housedash
+git clone https://github.com/archiso7/housedash.git /opt/housedash
 cd /opt/housedash
-git config core.sshCommand "ssh -i ~/.ssh/housedash_deploy"
 cp .env.example .env
 
-# 2. Build and start the demo (add DEMO_CHIME=loop in .env to test TV audio!)
+# 2. Build and start the demo (set DEMO_CHIME=loop in .env to test TV audio!)
 docker compose up -d --build
 docker compose logs -f
 
