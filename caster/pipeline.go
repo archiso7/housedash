@@ -12,16 +12,21 @@ import (
 	"time"
 )
 
-// pipeline supervises the three OS processes that turn a webpage into live HLS
-// segments with zero window manager:
+const pulseSinkName = "tv_sink"
+
+// pipeline supervises the OS processes that turn a webpage into a live HLS
+// audio+video stream with zero window manager and no physical sound card:
 //
-//  1. Xvfb     — creates an in-memory 1920x1080 virtual X11 display (:99)
-//  2. Chromium — renders TargetURL fullscreen (--kiosk) onto :99
-//  3. ffmpeg   — captures :99 via x11grab at low FPS and writes rolling 4s
-//                H.264 Baseline .ts segments + live.m3u8 into HLSDir (tmpfs)
+//  1. PulseAudio (optional, when EnableAudio=true) — creates an in-memory virtual
+//     speaker ("tv_sink") and its loopback capture source ("tv_sink.monitor").
+//  2. Xvfb     — creates an in-memory 1920x1080 virtual X11 display (:99)
+//  3. Chromium — renders TargetURL fullscreen (--kiosk) onto :99 and sends all
+//                browser audio (<audio>, Web Audio API, TTS) into tv_sink
+//  4. ffmpeg   — captures :99 via x11grab (+ tv_sink.monitor via pulse) and
+//                writes rolling 4s H.264 Baseline + AAC .ts segments into HLSDir
 //
-// Each child is supervised in its own loop so if Chromium or ffmpeg ever exits
-// unexpectedly, it restarts automatically without killing the container.
+// Each child is supervised in its own loop so if Chromium, PulseAudio, or
+// ffmpeg ever exits unexpectedly, it restarts automatically.
 type pipeline struct {
 	cfg    Config
 	logger *log.Logger
@@ -31,8 +36,8 @@ func newPipeline(cfg Config, logger *log.Logger) *pipeline {
 	return &pipeline{cfg: cfg, logger: logger}
 }
 
-// start prepares HLSDir and starts Xvfb -> Chromium -> ffmpeg in order.
-// All three processes stop automatically when ctx is cancelled.
+// start prepares HLSDir and launches PulseAudio (if enabled) -> Xvfb ->
+// Chromium -> ffmpeg in order. All children stop when ctx is cancelled.
 func (p *pipeline) start(ctx context.Context) error {
 	if err := os.MkdirAll(p.cfg.HLSDir, 0o755); err != nil {
 		return fmt.Errorf("create HLS dir %s: %w", p.cfg.HLSDir, err)
@@ -41,13 +46,29 @@ func (p *pipeline) start(ctx context.Context) error {
 	// never tries to play old timestamps.
 	p.cleanHLSDir()
 
-	// 1. Start Xvfb first and wait briefly for its UNIX socket (/tmp/.X11-unix/X99).
+	// 1. If audio is enabled, start our private headless PulseAudio daemon first
+	//    and wait for its UNIX socket so both Chromium and ffmpeg can attach.
+	if p.cfg.EnableAudio {
+		pulseDir := filepath.Dir(p.cfg.PulseSocket)
+		if err := os.MkdirAll(pulseDir, 0o700); err != nil {
+			return fmt.Errorf("create pulse dir %s: %w", pulseDir, err)
+		}
+		_ = os.Remove(p.cfg.PulseSocket)
+		go p.supervise(ctx, "pulseaudio", p.pulseCmd)
+		if err := p.waitForSocket(ctx, "pulseaudio", p.cfg.PulseSocket, 5*time.Second); err != nil {
+			return err
+		}
+	}
+
+	// 2. Start Xvfb and wait for its UNIX socket (/tmp/.X11-unix/X99).
 	go p.supervise(ctx, "xvfb", p.xvfbCmd)
-	if err := p.waitForX11(ctx, 5*time.Second); err != nil {
+	dispNum := strings.TrimPrefix(p.cfg.Display, ":")
+	x11Sock := filepath.Join("/tmp/.X11-unix", "X"+dispNum)
+	if err := p.waitForSocket(ctx, "xvfb", x11Sock, 5*time.Second); err != nil {
 		return err
 	}
 
-	// 2. Launch headless Chromium in kiosk mode pointed at TargetURL.
+	// 3. Launch headless Chromium in kiosk mode pointed at TargetURL.
 	go p.supervise(ctx, "chromium", p.chromiumCmd)
 
 	// Give Chromium a moment to paint its first frame before ffmpeg starts
@@ -58,9 +79,31 @@ func (p *pipeline) start(ctx context.Context) error {
 	case <-time.After(2 * time.Second):
 	}
 
-	// 3. Launch ffmpeg x11grab -> HLS sliding window.
+	// 4. Launch ffmpeg x11grab (+ optional pulse audio) -> HLS sliding window.
 	go p.supervise(ctx, "ffmpeg", p.ffmpegCmd)
 	return nil
+}
+
+// pulseCmd starts a minimal, self-contained PulseAudio daemon with NO hardware
+// probing (-n skips /etc/pulse/default.pa). Instead it loads only:
+//   - module-null-sink: a fake speaker in RAM (tv_sink) + capture monitor (tv_sink.monitor)
+//   - module-native-protocol-unix: local UNIX socket that Chromium & ffmpeg connect to
+//
+// Passing --disable-shm=yes avoids Docker's small /dev/shm crashing PulseAudio.
+func (p *pipeline) pulseCmd(ctx context.Context) *exec.Cmd {
+	args := []string{
+		"--daemonize=no",
+		"--exit-idle-time=-1",
+		"--disallow-exit",
+		"--disable-shm=yes",
+		"--log-target=stderr",
+		"-n",
+		"-L", fmt.Sprintf("module-null-sink sink_name=%s sink_properties=device.description=TV", pulseSinkName),
+		"-L", fmt.Sprintf("module-native-protocol-unix auth-anonymous=1 socket=%s", p.cfg.PulseSocket),
+	}
+	cmd := exec.CommandContext(ctx, p.cfg.PulseBin, args...)
+	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+filepath.Dir(p.cfg.PulseSocket))
+	return cmd
 }
 
 func (p *pipeline) xvfbCmd(ctx context.Context) *exec.Cmd {
@@ -80,6 +123,7 @@ func (p *pipeline) chromiumCmd(ctx context.Context) *exec.Cmd {
 	//   --force-device-scale-factor=1                   : exact 1:1 CSS pixels
 	//   --disable-dev-shm-usage                         : avoid Docker's tiny 64MB /dev/shm crashes
 	//   --disable-background-timer-throttling           : keep JS clocks/polls running smoothly in Xvfb
+	//   --autoplay-policy=no-user-gesture-required      : allow <audio> / Web Audio without clicking the TV
 	//   --noerrdialogs / --disable-infobars             : never pop up "Chrome didn't shut down" banners
 	// Note: do NOT pass --disable-software-rasterizer alongside --disable-gpu,
 	// since headless Xvfb relies on Chromium's software compositor to paint frames.
@@ -105,7 +149,18 @@ func (p *pipeline) chromiumCmd(ctx context.Context) *exec.Cmd {
 		p.cfg.TargetURL,
 	}
 	cmd := exec.CommandContext(ctx, p.cfg.ChromiumBin, args...)
-	cmd.Env = append(os.Environ(), "DISPLAY="+p.cfg.Display)
+	env := append(os.Environ(), "DISPLAY="+p.cfg.Display)
+	if p.cfg.EnableAudio {
+		// Point Chromium's PulseAudio client directly at our virtual null sink.
+		env = append(env,
+			"PULSE_SERVER=unix:"+p.cfg.PulseSocket,
+			"PULSE_SINK="+pulseSinkName,
+		)
+	} else {
+		args = append([]string{"--mute-audio"}, args...)
+		cmd = exec.CommandContext(ctx, p.cfg.ChromiumBin, args...)
+	}
+	cmd.Env = env
 	return cmd
 }
 
@@ -123,11 +178,30 @@ func (p *pipeline) ffmpegCmd(ctx context.Context) *exec.Cmd {
 
 	args := []string{
 		"-loglevel", "warning",
+		// Video input: virtual X11 display (:99)
+		"-thread_queue_size", "512",
 		"-f", "x11grab",
 		"-draw_mouse", "0",
 		"-framerate", strconv.Itoa(p.cfg.FPS),
 		"-video_size", fmt.Sprintf("%dx%d", p.cfg.Width, p.cfg.Height),
 		"-i", p.cfg.Display,
+	}
+
+	if p.cfg.EnableAudio {
+		// Audio input: loopback monitor of our virtual PulseAudio null sink.
+		// Even when Chromium is silent, tv_sink.monitor yields clean digital
+		// silence so HLS segments always carry continuous, valid AAC audio.
+		args = append(args,
+			"-thread_queue_size", "512",
+			"-f", "pulse",
+			"-ac", "2",
+			"-ar", "44100",
+			"-i", pulseSinkName+".monitor",
+		)
+	}
+
+	// Video encoder settings
+	args = append(args,
 		"-c:v", "libx264",
 		"-preset", "ultrafast",
 		"-tune", "stillimage",
@@ -137,14 +211,35 @@ func (p *pipeline) ffmpegCmd(ctx context.Context) *exec.Cmd {
 		"-g", strconv.Itoa(gop),
 		"-keyint_min", strconv.Itoa(gop),
 		"-sc_threshold", "0",
+	)
+
+	if p.cfg.EnableAudio {
+		// AAC stereo 44.1kHz is universally supported by AirPlay 1 / HDMI TVs.
+		// aresample=async=1 keeps audio timestamps locked smoothly to video.
+		args = append(args,
+			"-af", "aresample=async=1:first_pts=0",
+			"-c:a", "aac",
+			"-b:a", p.cfg.AudioBitrate,
+			"-ar", "44100",
+			"-ac", "2",
+		)
+	}
+
+	// HLS sliding-window muxer settings
+	args = append(args,
 		"-f", "hls",
 		"-hls_time", strconv.Itoa(p.cfg.SegmentSec),
 		"-hls_list_size", strconv.Itoa(p.cfg.ListSize),
 		"-hls_flags", "delete_segments+independent_segments+temp_file",
 		"-hls_segment_filename", segmentPattern,
 		playlistPath,
+	)
+
+	cmd := exec.CommandContext(ctx, p.cfg.FFmpegBin, args...)
+	if p.cfg.EnableAudio {
+		cmd.Env = append(os.Environ(), "PULSE_SERVER=unix:"+p.cfg.PulseSocket)
 	}
-	return exec.CommandContext(ctx, p.cfg.FFmpegBin, args...)
+	return cmd
 }
 
 // supervise runs a child command and restarts it with a short pause if it exits
@@ -155,7 +250,7 @@ func (p *pipeline) supervise(ctx context.Context, name string, build func(contex
 			return
 		}
 		cmd := build(ctx)
-		// Forward stderr so container logs show real ffmpeg/chromium diagnostics.
+		// Forward stderr so container logs show real pulseaudio/ffmpeg/chromium diagnostics.
 		cmd.Stderr = os.Stderr
 		p.logger.Printf("[%s] starting: %s", name, cmd.Path)
 
@@ -173,14 +268,11 @@ func (p *pipeline) supervise(ctx context.Context, name string, build func(contex
 	}
 }
 
-func (p *pipeline) waitForX11(ctx context.Context, timeout time.Duration) error {
-	dispNum := strings.TrimPrefix(p.cfg.Display, ":")
-	sockPath := filepath.Join("/tmp/.X11-unix", "X"+dispNum)
+func (p *pipeline) waitForSocket(ctx context.Context, name, sockPath string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(sockPath); err == nil {
-			p.logger.Printf("[xvfb] display %s is ready (%s)", p.cfg.Display, sockPath)
+			p.logger.Printf("[%s] socket ready (%s)", name, sockPath)
 			return nil
 		}
 		select {
@@ -189,7 +281,7 @@ func (p *pipeline) waitForX11(ctx context.Context, timeout time.Duration) error 
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("xvfb: timed out waiting for %s", sockPath)
+	return fmt.Errorf("%s: timed out waiting for socket %s", name, sockPath)
 }
 
 func (p *pipeline) cleanHLSDir() {

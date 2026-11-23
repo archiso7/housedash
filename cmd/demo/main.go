@@ -34,25 +34,30 @@ func main() {
 		demoAddr := envOr("DEMO_ADDR", "127.0.0.1:8090")
 		startDemoServer(ctx, demoAddr)
 		targetURL = "http://" + demoAddr + "/"
+		if chime := envOr("DEMO_CHIME", ""); chime != "" {
+			targetURL += "?chime=" + chime
+		}
 		log.Printf("[demo] serving built-in demo page at %s", targetURL)
 	} else {
 		log.Printf("[demo] casting custom TARGET_URL=%s", targetURL)
 	}
 
 	c := caster.New(caster.Config{
-		TargetURL:   targetURL,
-		DeviceHost:  envOr("AIMIBO_HOST", "10.52.0.18"),
-		DevicePort:  envInt("AIMIBO_PORT", 7000),
-		DeviceName:  envOr("AIMIBO_NAME", "Office Tv"),
-		StreamHost:  envOr("STREAM_HOST", ""),
-		HTTPAddr:    envOr("HLS_HTTP_ADDR", ":8899"),
-		HLSDir:      envOr("HLS_DIR", "/tmp/hls"),
-		Width:       envInt("SCREEN_WIDTH", 1920),
-		Height:      envInt("SCREEN_HEIGHT", 1080),
-		FPS:         envInt("STREAM_FPS", 2),
-		SegmentSec:  envInt("HLS_SEGMENT_SEC", 4),
-		ListSize:    envInt("HLS_LIST_SIZE", 5),
-		ChromiumBin: envOr("CHROMIUM_BIN", "chromium"),
+		TargetURL:    targetURL,
+		DeviceHost:   envOr("AIMIBO_HOST", "10.52.0.18"),
+		DevicePort:   envInt("AIMIBO_PORT", 7000),
+		DeviceName:   envOr("AIMIBO_NAME", "Office Tv"),
+		StreamHost:   envOr("STREAM_HOST", ""),
+		HTTPAddr:     envOr("HLS_HTTP_ADDR", ":8899"),
+		HLSDir:       envOr("HLS_DIR", "/tmp/hls"),
+		Width:        envInt("SCREEN_WIDTH", 1920),
+		Height:       envInt("SCREEN_HEIGHT", 1080),
+		FPS:          envInt("STREAM_FPS", 2),
+		SegmentSec:   envInt("HLS_SEGMENT_SEC", 4),
+		ListSize:     envInt("HLS_LIST_SIZE", 5),
+		ChromiumBin:  envOr("CHROMIUM_BIN", "chromium"),
+		EnableAudio:  envBool("ENABLE_AUDIO", true),
+		AudioBitrate: envOr("AUDIO_BITRATE", "128k"),
 	})
 
 	if err := c.Run(ctx); err != nil && err != context.Canceled {
@@ -99,6 +104,15 @@ func envInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return fallback

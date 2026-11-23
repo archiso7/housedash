@@ -7,8 +7,9 @@ COPY cmd/ ./cmd/
 RUN CGO_ENABLED=0 go build -o /out/housedash-caster ./cmd/demo
 
 # Stage 2: Minimal headless runtime (no desktop environment, no window manager)
-# Only installs Xvfb (virtual framebuffer), Chromium (kiosk renderer), ffmpeg
-# (x11grab -> H.264 HLS), and basic fonts so text renders crisply.
+# Installs Xvfb (virtual framebuffer), PulseAudio (virtual null speaker for TV
+# audio), Chromium (kiosk renderer), ffmpeg (x11grab + pulse -> H.264/AAC HLS),
+# and basic fonts so text renders crisply.
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     fonts-dejavu-core \
     fonts-liberation \
+    pulseaudio \
     tzdata \
     xvfb \
     && rm -rf /var/lib/apt/lists/*

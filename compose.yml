@@ -10,10 +10,12 @@ services:
     # 3. mDNS multicast (224.0.0.251:5353) works to rediscover "Office Tv" if its DHCP IP changes.
     network_mode: host
 
-    # Keep rolling 4-second HLS .ts segments in RAM so we never wear out the host SSD.
+    # Keep rolling 4-second HLS .ts segments, Chromium profile, and PulseAudio
+    # socket in RAM so we never wear out the host SSD.
     tmpfs:
       - /tmp/hls:size=64m
       - /tmp/chromium-profile:size=128m
+      - /tmp/pulse:size=16m
 
     env_file:
       - path: .env
@@ -26,4 +28,7 @@ services:
       - STREAM_HOST=${STREAM_HOST:-10.52.0.4}
       - HLS_HTTP_ADDR=${HLS_HTTP_ADDR:-:8899}
       - HLS_DIR=/tmp/hls
+      - ENABLE_AUDIO=${ENABLE_AUDIO:-true}
+      - AUDIO_BITRATE=${AUDIO_BITRATE:-128k}
+      - DEMO_CHIME=${DEMO_CHIME:-}
       - TARGET_URL=${TARGET_URL:-}

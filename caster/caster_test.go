@@ -176,6 +176,49 @@ func TestHLSServerAndWatchdog(t *testing.T) {
 	}
 }
 
+func TestPipelineAudioArgs(t *testing.T) {
+	base := Config{TargetURL: "http://127.0.0.1:8090/", DeviceHost: "10.52.0.18"}.withDefaults()
+
+	// Audio disabled: no pulse input or AAC encoder; Chromium gets --mute-audio.
+	pOff := newPipeline(base, log.New(io.Discard, "", 0))
+	ffOff := strings.Join(pOff.ffmpegCmd(t.Context()).Args, " ")
+	if strings.Contains(ffOff, "-f pulse") || strings.Contains(ffOff, "-c:a aac") {
+		t.Fatalf("unexpected audio args when EnableAudio=false: %s", ffOff)
+	}
+	chOff := strings.Join(pOff.chromiumCmd(t.Context()).Args, " ")
+	if !strings.Contains(chOff, "--mute-audio") {
+		t.Fatalf("expected --mute-audio when EnableAudio=false: %s", chOff)
+	}
+
+	// Audio enabled: pulse tv_sink.monitor + AAC + PULSE_SERVER env on both processes.
+	withAudio := base
+	withAudio.EnableAudio = true
+	pOn := newPipeline(withAudio, log.New(io.Discard, "", 0))
+	ffCmd := pOn.ffmpegCmd(t.Context())
+	ffOn := strings.Join(ffCmd.Args, " ")
+	for _, want := range []string{"-f pulse", "tv_sink.monitor", "-c:a aac", "-b:a 128k"} {
+		if !strings.Contains(ffOn, want) {
+			t.Fatalf("expected %q in ffmpeg args when EnableAudio=true: %s", want, ffOn)
+		}
+	}
+	chCmd := pOn.chromiumCmd(t.Context())
+	if !containsEnv(chCmd.Env, "PULSE_SERVER=unix:/tmp/pulse/native") || !containsEnv(chCmd.Env, "PULSE_SINK=tv_sink") {
+		t.Fatalf("expected PULSE_SERVER and PULSE_SINK in Chromium env")
+	}
+	if !containsEnv(ffCmd.Env, "PULSE_SERVER=unix:/tmp/pulse/native") {
+		t.Fatalf("expected PULSE_SERVER in ffmpeg env")
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, kv := range env {
+		if kv == want {
+			return true
+		}
+	}
+	return false
+}
+
 func readRawHTTP(t *testing.T, r *bufio.Reader) (string, string) {
 	t.Helper()
 	var hdr strings.Builder

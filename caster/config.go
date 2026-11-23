@@ -59,11 +59,19 @@ type Config struct {
 	SegmentSec int    // Seconds per HLS .ts segment (default 4)
 	ListSize   int    // Number of segments kept in the sliding playlist (default 5)
 
-	// Binary overrides in case chromium/ffmpeg/Xvfb live under different names
-	// (e.g. "chromium-browser" vs "chromium" vs "google-chrome").
+	// Binary overrides in case chromium/ffmpeg/Xvfb/pulseaudio live under
+	// different names (e.g. "chromium-browser" vs "chromium").
 	XvfbBin     string
 	ChromiumBin string
 	FFmpegBin   string
+	PulseBin    string
+
+	// Audio capture (routes browser <audio> / Web Audio / TTS out through the TV speakers).
+	// When EnableAudio is true, the pipeline runs a headless PulseAudio null sink
+	// (no physical sound card needed) and muxes its monitor into the HLS stream as AAC.
+	EnableAudio  bool
+	PulseSocket  string // UNIX socket path for our private PulseAudio daemon (default "/tmp/pulse/native")
+	AudioBitrate string // AAC bitrate for ffmpeg (default "128k")
 
 	// Health / reconnect tuning.
 	PollInterval time.Duration // How often to poll GET /playback-info (default 10s)
@@ -110,6 +118,15 @@ func (c Config) withDefaults() Config {
 	}
 	if c.FFmpegBin == "" {
 		c.FFmpegBin = "ffmpeg"
+	}
+	if c.PulseBin == "" {
+		c.PulseBin = "pulseaudio"
+	}
+	if c.PulseSocket == "" {
+		c.PulseSocket = "/tmp/pulse/native"
+	}
+	if c.AudioBitrate == "" {
+		c.AudioBitrate = "128k"
 	}
 	if c.PollInterval == 0 {
 		c.PollInterval = 10 * time.Second
