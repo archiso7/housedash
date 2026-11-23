@@ -54,8 +54,9 @@ Every file is intentionally small, stdlib-only, and heavily commented:
 | `caster/pipeline.go` | Supervises `Xvfb`, `chromium --kiosk`, and `ffmpeg` with automatic restart on crash |
 | `caster/caster.go` | Top-level `Caster.Run(ctx)` tying everything together with exponential-backoff auto-reconnect |
 | `caster/caster_test.go` | Unit tests covering the AirPlay wire format, mDNS matching, and HLS watchdog |
-| `cmd/demo/main.go` | Runnable demo: serves `demo.html` (or any `TARGET_URL`) and casts it to the TV |
-| `cmd/demo/demo.html` | Plasma-safe dark 1080p demo clock with subtle pixel-shift and optional 10pm–6am blackout (`?night=auto`) |
+| `cmd/demo/main.go` | Runnable demo: serves `/` (TV view), `/controls` (interactive phone/laptop UI), and `/api/state`, then casts `/` to the TV |
+| `cmd/demo/demo.html` | Plasma-safe dark 1080p TV view with live Toronto clock, message banner, Web Audio chime, subtle pixel-shift, and blackout mode |
+| `cmd/demo/controls.html` | Interactive control page (`http://10.52.0.4:8090/controls`) to send messages to the TV, trigger the chime, or toggle blackout live |
 
 ---
 

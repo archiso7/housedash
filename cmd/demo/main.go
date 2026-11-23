@@ -1,19 +1,27 @@
-// Command demo is a minimal runnable example showing how to use the
+// Command demo is a runnable example showing how to use the
 // github.com/archiso7/housedash/caster package.
 //
-// By default it serves the embedded demo.html page on http://127.0.0.1:8090/
-// and casts it to the AIMIBO dongle. If you set TARGET_URL, it casts your own
-// dashboard URL instead!
+// By default it starts a tiny demo web server on :8090 with:
+//   - GET /          : 1920x1080 plasma-safe TV view (what Chromium casts)
+//   - GET /controls  : mobile/laptop control page to send messages, play a TV
+//                      chime, and toggle night blackout live
+//   - GET/POST /api/state : simple JSON state shared between /controls and /
+//
+// Once you build your own dashboard, set TARGET_URL=http://127.0.0.1:<port>/
+// (or import github.com/archiso7/housedash/caster directly in your Go binary).
 package main
 
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +31,18 @@ import (
 //go:embed demo.html
 var demoHTML []byte
 
+//go:embed controls.html
+var controlsHTML []byte
+
+// demoState is the tiny in-memory state manipulated by /controls and polled by
+// the TV view on /. Replace this with SQLite in your real dashboard!
+type demoState struct {
+	mu            sync.Mutex
+	Message       string `json:"message"`
+	NightBlackout bool   `json:"night_blackout"`
+	ChimeSeq      int    `json:"chime_seq"`
+}
+
 func main() {
 	// Cancel cleanly on Ctrl-C or `docker stop`.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -30,14 +50,20 @@ func main() {
 
 	targetURL := envOr("TARGET_URL", "")
 	if targetURL == "" {
-		// No external dashboard URL provided — start the built-in demo page.
-		demoAddr := envOr("DEMO_ADDR", "127.0.0.1:8090")
+		// Bind on 0.0.0.0:8090 so you can open http://10.52.0.4:8090/controls
+		// from your laptop or phone while Chromium loads http://127.0.0.1:8090/.
+		demoAddr := envOr("DEMO_ADDR", ":8090")
 		startDemoServer(ctx, demoAddr)
-		targetURL = "http://" + demoAddr + "/"
+
+		_, port, err := net.SplitHostPort(demoAddr)
+		if err != nil || port == "" {
+			port = "8090"
+		}
+		targetURL = "http://127.0.0.1:" + port + "/"
 		if chime := envOr("DEMO_CHIME", ""); chime != "" {
 			targetURL += "?chime=" + chime
 		}
-		log.Printf("[demo] serving built-in demo page at %s", targetURL)
+		log.Printf("[demo] TV view at %s | interactive controls at http://<server-ip>:%s/controls", targetURL, port)
 	} else {
 		log.Printf("[demo] casting custom TARGET_URL=%s", targetURL)
 	}
@@ -67,10 +93,48 @@ func main() {
 }
 
 func startDemoServer(ctx context.Context, addr string) {
+	state := &demoState{
+		Message: "Open http://10.52.0.4:8090/controls to send a message or play a chime!",
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(demoHTML)
+	})
+	mux.HandleFunc("GET /controls", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(controlsHTML)
+	})
+	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(state)
+	})
+	mux.HandleFunc("POST /api/state", func(w http.ResponseWriter, r *http.Request) {
+		var patch struct {
+			Message       *string `json:"message"`
+			NightBlackout *bool   `json:"night_blackout"`
+			PlayChime     bool    `json:"play_chime"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		state.mu.Lock()
+		if patch.Message != nil {
+			state.Message = *patch.Message
+		}
+		if patch.NightBlackout != nil {
+			state.NightBlackout = *patch.NightBlackout
+		}
+		if patch.PlayChime {
+			state.ChimeSeq++
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(state)
+		state.mu.Unlock()
 	})
 
 	srv := &http.Server{

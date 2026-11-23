@@ -81,7 +81,7 @@
     }
 
     #clock {
-      font-size: 210px;
+      font-size: 200px;
       font-weight: 700;
       letter-spacing: -4px;
       line-height: 1;
@@ -90,23 +90,36 @@
     }
 
     #date {
-      font-size: 46px;
+      font-size: 44px;
       color: #94a3b8;
       font-weight: 500;
+    }
+
+    #banner {
+      margin-top: 12px;
+      padding: 18px 36px;
+      border-radius: 16px;
+      background: #0f172a;
+      border: 1px solid #1e3a5f;
+      color: #7dd3fc;
+      font-size: 38px;
+      font-weight: 600;
+      max-width: 1400px;
+      text-align: center;
     }
 
     .pill-row {
       display: flex;
       gap: 24px;
-      margin-top: 24px;
+      margin-top: 16px;
     }
 
     .pill {
       background: #0f172a;
       border: 1px solid #1e293b;
       border-radius: 14px;
-      padding: 18px 28px;
-      font-size: 26px;
+      padding: 16px 26px;
+      font-size: 24px;
       color: #94a3b8;
       font-variant-numeric: tabular-nums;
     }
@@ -137,15 +150,16 @@
     <main>
       <div id="clock">--:--:--</div>
       <div id="date">Loading...</div>
+      <div id="banner">Open http://10.52.0.4:8090/controls to interact with this screen</div>
       <div class="pill-row">
         <div class="pill">Stream Uptime:<strong id="uptime">00:00:00</strong></div>
         <div class="pill">Pixel Shift:<strong id="shift">0px, 0px</strong></div>
-        <div class="pill">Audio:<strong id="audio-status">Ready (Web Audio)</strong></div>
+        <div class="pill">Audio:<strong id="audio-status">Ready</strong></div>
       </div>
     </main>
 
     <footer>
-      <div>Replace this demo by setting TARGET_URL or importing github.com/archiso7/housedash/caster</div>
+      <div>Interactive controls: /controls · Replace with TARGET_URL or import github.com/archiso7/housedash/caster</div>
       <div>1920 × 1080 · Plasma-Safe Dark Theme</div>
     </footer>
   </div>
@@ -155,49 +169,10 @@
     const startMS = Date.now();
     const params = new URLSearchParams(window.location.search);
 
-    // Optional night blackout (?night=auto turns screen pure black 22:00-06:00).
-    // Off by default in the demo so testing late at night still shows the clock!
+    // Optional scheduled night blackout (?night=auto turns screen pure black 22:00-06:00).
+    // You can also toggle blackout live from /controls.
     const nightMode = params.get("night") || "off";
-
-    // Optional Web Audio chime test (?chime=once or ?chime=loop).
-    // Works unattended because Chromium runs with --autoplay-policy=no-user-gesture-required.
     const chimeMode = params.get("chime") || "off";
-
-    function playChime() {
-      try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const notes = [523.25, 659.25, 783.99]; // C5 -> E5 -> G5 soft triad
-        notes.forEach((freq, idx) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = "sine";
-          osc.frequency.value = freq;
-          const t0 = ctx.currentTime + idx * 0.16;
-          gain.gain.setValueAtTime(0.001, t0);
-          gain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.03);
-          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.55);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start(t0);
-          osc.stop(t0 + 0.6);
-        });
-        document.getElementById("audio-status").textContent = "Chime played";
-      } catch (e) {
-        document.getElementById("audio-status").textContent = "Audio err: " + e.message;
-      }
-    }
-
-    if (chimeMode === "once") {
-      document.getElementById("audio-status").textContent = "Chime in 12s";
-      // Wait 12s so the AIMIBO has buffered initial HLS segments before chiming.
-      setTimeout(playChime, 12000);
-    } else if (chimeMode === "loop") {
-      document.getElementById("audio-status").textContent = "Chime every 20s";
-      setTimeout(() => {
-        playChime();
-        setInterval(playChime, 20000);
-      }, 12000);
-    }
 
     const timeFmt = new Intl.DateTimeFormat("en-CA", {
       timeZone: TZ,
@@ -223,6 +198,55 @@
       return String(n).padStart(2, "0");
     }
 
+    // Play a gentle 3-note Web Audio chime. Works unattended because Chromium
+    // runs with --autoplay-policy=no-user-gesture-required.
+    function playChime() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const notes = [523.25, 659.25, 783.99]; // C5 -> E5 -> G5
+        notes.forEach((freq, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.value = freq;
+          const t0 = ctx.currentTime + idx * 0.16;
+          gain.gain.setValueAtTime(0.001, t0);
+          gain.gain.exponentialRampToValueAtTime(0.22, t0 + 0.03);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.55);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(t0);
+          osc.stop(t0 + 0.6);
+        });
+        document.getElementById("audio-status").textContent = "Chime #" + lastChimeSeq + " played";
+      } catch (e) {
+        document.getElementById("audio-status").textContent = "Audio err: " + e.message;
+      }
+    }
+
+    let manualBlackout = false;
+    let lastChimeSeq = null;
+
+    // Poll /api/state every second so updates from /controls appear live on TV.
+    async function pollState() {
+      try {
+        const res = await fetch("/api/state", { cache: "no-store" });
+        const st = await res.json();
+        if (st.message) {
+          document.getElementById("banner").textContent = st.message;
+        }
+        manualBlackout = Boolean(st.night_blackout);
+        if (lastChimeSeq === null) {
+          lastChimeSeq = st.chime_seq;
+        } else if (st.chime_seq > lastChimeSeq) {
+          lastChimeSeq = st.chime_seq;
+          playChime();
+        }
+      } catch (_) {
+        // Ignore transient poll errors if opened directly via file://
+      }
+    }
+
     function tick() {
       const now = new Date();
       document.getElementById("clock").textContent = timeFmt.format(now);
@@ -234,14 +258,14 @@
       const s = elapsed % 60;
       document.getElementById("uptime").textContent = `${pad(h)}:${pad(m)}:${pad(s)}`;
 
-      // Example 10pm-6am plasma blackout hook
+      let blackout = manualBlackout;
       if (nightMode === "auto") {
         const hr = parseInt(hourFmt.format(now), 10);
-        const isNight = hr >= 22 || hr < 6;
-        document.body.classList.toggle("night-blackout", isNight);
+        if (hr >= 22 || hr < 6) blackout = true;
       } else if (nightMode === "on") {
-        document.body.classList.add("night-blackout");
+        blackout = true;
       }
+      document.body.classList.toggle("night-blackout", blackout);
     }
 
     // Subtle plasma anti-burn-in pixel shift: orbits within +/-8px every 60s.
@@ -255,9 +279,21 @@
       step++;
     }
 
+    if (chimeMode === "once") {
+      setTimeout(() => { lastChimeSeq = (lastChimeSeq || 0) + 1; playChime(); }, 12000);
+    } else if (chimeMode === "loop") {
+      setTimeout(() => {
+        lastChimeSeq = (lastChimeSeq || 0) + 1;
+        playChime();
+        setInterval(() => { lastChimeSeq++; playChime(); }, 20000);
+      }, 12000);
+    }
+
     tick();
     pixelShift();
+    pollState();
     setInterval(tick, 1000);
+    setInterval(pollState, 1000);
     setInterval(pixelShift, 60000);
   </script>
 </body>
