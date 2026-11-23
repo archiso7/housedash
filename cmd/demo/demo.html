@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>HouseDash — TV Caster Demo</title>
+  <style>
+    /*
+     * Plasma-safe 1920x1080 TV layout:
+     * - Pure #000000 background so unused plasma cells stay off.
+     * - Muted luminance text/accents (avoid blazing #ffffff blocks).
+     * - Smooth transform transition for subtle periodic pixel-shift.
+     */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background: #000000;
+      color: #cbd5e1;
+      font-family: "DejaVu Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    #stage {
+      width: 1920px;
+      height: 1080px;
+      padding: 48px 64px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 32px;
+      transition: transform 2s ease-in-out, opacity 1.5s ease-in-out;
+    }
+
+    /* Night blackout mode: pure black frame while keeping HLS stream alive,
+       so the AIMIBO never reverts to its bright blue home screen. */
+    body.night-blackout #stage {
+      opacity: 0;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      border-bottom: 1px solid #1e293b;
+      padding-bottom: 24px;
+    }
+
+    .kicker {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 5px;
+      text-transform: uppercase;
+      color: #38bdf8;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-size: 26px;
+      color: #64748b;
+    }
+
+    .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #22c55e;
+    }
+
+    main {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 24px;
+      background: #080b10;
+      border: 1px solid #172030;
+      border-radius: 24px;
+      padding: 48px;
+    }
+
+    #clock {
+      font-size: 210px;
+      font-weight: 700;
+      letter-spacing: -4px;
+      line-height: 1;
+      color: #e2e8f0;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #date {
+      font-size: 46px;
+      color: #94a3b8;
+      font-weight: 500;
+    }
+
+    .pill-row {
+      display: flex;
+      gap: 24px;
+      margin-top: 24px;
+    }
+
+    .pill {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 14px;
+      padding: 18px 28px;
+      font-size: 26px;
+      color: #94a3b8;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pill strong {
+      color: #cbd5e1;
+      margin-left: 8px;
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      font-size: 24px;
+      color: #475569;
+    }
+  </style>
+</head>
+<body>
+  <div id="stage">
+    <header>
+      <div class="kicker">DevDegree Hype House · Caster Demo</div>
+      <div class="status">
+        <span class="dot"></span>
+        <span>Headless Chromium → ffmpeg HLS → AirPlay 1</span>
+      </div>
+    </header>
+
+    <main>
+      <div id="clock">--:--:--</div>
+      <div id="date">Loading...</div>
+      <div class="pill-row">
+        <div class="pill">Stream Uptime:<strong id="uptime">00:00:00</strong></div>
+        <div class="pill">Pixel Shift:<strong id="shift">0px, 0px</strong></div>
+        <div class="pill">Timezone:<strong>America/Toronto</strong></div>
+      </div>
+    </main>
+
+    <footer>
+      <div>Replace this demo by setting TARGET_URL or importing github.com/archiso7/housedash/caster</div>
+      <div>1920 × 1080 · Plasma-Safe Dark Theme</div>
+    </footer>
+  </div>
+
+  <script>
+    const TZ = "America/Toronto";
+    const startMS = Date.now();
+    const params = new URLSearchParams(window.location.search);
+
+    // Optional night blackout (?night=auto turns screen pure black 22:00-06:00).
+    // Off by default in the demo so testing late at night still shows the clock!
+    const nightMode = params.get("night") || "off";
+
+    const timeFmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const dateFmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
+    const hourFmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      hour: "2-digit",
+      hour12: false,
+    });
+
+    function pad(n) {
+      return String(n).padStart(2, "0");
+    }
+
+    function tick() {
+      const now = new Date();
+      document.getElementById("clock").textContent = timeFmt.format(now);
+      document.getElementById("date").textContent = dateFmt.format(now);
+
+      const elapsed = Math.floor((Date.now() - startMS) / 1000);
+      const h = Math.floor(elapsed / 3600);
+      const m = Math.floor((elapsed % 3600) / 60);
+      const s = elapsed % 60;
+      document.getElementById("uptime").textContent = `${pad(h)}:${pad(m)}:${pad(s)}`;
+
+      // Example 10pm-6am plasma blackout hook
+      if (nightMode === "auto") {
+        const hr = parseInt(hourFmt.format(now), 10);
+        const isNight = hr >= 22 || hr < 6;
+        document.body.classList.toggle("night-blackout", isNight);
+      } else if (nightMode === "on") {
+        document.body.classList.add("night-blackout");
+      }
+    }
+
+    // Subtle plasma anti-burn-in pixel shift: orbits within +/-8px every 60s.
+    let step = 0;
+    function pixelShift() {
+      const angle = (step * Math.PI) / 6;
+      const dx = Math.round(Math.cos(angle) * 8);
+      const dy = Math.round(Math.sin(angle) * 6);
+      document.getElementById("stage").style.transform = `translate(${dx}px, ${dy}px)`;
+      document.getElementById("shift").textContent = `${dx}px, ${dy}px`;
+      step++;
+    }
+
+    tick();
+    pixelShift();
+    setInterval(tick, 1000);
+    setInterval(pixelShift, 60000);
+  </script>
+</body>
+</html>

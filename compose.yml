@@ -1,0 +1,29 @@
+services:
+  caster:
+    build: .
+    container_name: housedash-caster
+    restart: unless-stopped
+
+    # Host networking gives the container direct L2 access to the LAN so:
+    # 1. It can reach the AIMIBO dongle directly (10.52.0.18:7000).
+    # 2. The AIMIBO can fetch http://<server-ip>:8899/live.m3u8 back from us.
+    # 3. mDNS multicast (224.0.0.251:5353) works to rediscover "Office Tv" if its DHCP IP changes.
+    network_mode: host
+
+    # Keep rolling 4-second HLS .ts segments in RAM so we never wear out the host SSD.
+    tmpfs:
+      - /tmp/hls:size=64m
+      - /tmp/chromium-profile:size=128m
+
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      - TZ=America/Toronto
+      - AIMIBO_HOST=${AIMIBO_HOST:-10.52.0.18}
+      - AIMIBO_NAME=${AIMIBO_NAME:-Office Tv}
+      - STREAM_HOST=${STREAM_HOST:-10.52.0.4}
+      - HLS_HTTP_ADDR=${HLS_HTTP_ADDR:-:8899}
+      - HLS_DIR=/tmp/hls
+      - TARGET_URL=${TARGET_URL:-}
