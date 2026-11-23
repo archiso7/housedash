@@ -102,13 +102,16 @@ func (c Config) withDefaults() Config {
 		c.Height = 1080
 	}
 	if c.FPS == 0 {
-		c.FPS = 2
+		// 15fps keeps cheap hardware H.264 decoders (like the AIMIBO's AM8268)
+		// happy without frame-buffer stalling/jumping, while still using low CPU.
+		c.FPS = 15
 	}
 	if c.SegmentSec == 0 {
-		c.SegmentSec = 4
+		// 2-second HLS segments keep end-to-end TV latency around ~4-6s.
+		c.SegmentSec = 2
 	}
 	if c.ListSize == 0 {
-		c.ListSize = 5
+		c.ListSize = 3
 	}
 	if c.XvfbBin == "" {
 		c.XvfbBin = "Xvfb"

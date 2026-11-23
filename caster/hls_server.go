@@ -65,6 +65,7 @@ func (s *hlsServer) handleFile(w http.ResponseWriter, r *http.Request) {
 		contentType = "video/mp2t"
 		s.lastSegNS.Store(time.Now().UnixNano())
 		s.totalSegs.Add(1)
+		s.logger.Printf("[hls] served %s to %s", clean, r.RemoteAddr)
 	default:
 		http.NotFound(w, r)
 		return

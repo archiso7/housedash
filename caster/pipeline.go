@@ -166,11 +166,13 @@ func (p *pipeline) chromiumCmd(ctx context.Context) *exec.Cmd {
 
 func (p *pipeline) ffmpegCmd(ctx context.Context) *exec.Cmd {
 	// Key encoding choices verified against the AIMIBO hardware decoder:
-	//   -framerate 2                : dashboards barely move; 2fps uses near-zero CPU
+	//   -framerate 15               : avoids hardware decode-buffer stutter/jumps seen at 2fps
+	//   -vsync cfr                  : guarantees rock-steady constant framerate timestamps
+	//   -tune zerolatency           : zero encoder lookahead buffering for lowest latency
 	//   -profile:v baseline         : universally decoded by cheap HDMI dongles (no B-frames)
 	//   -pix_fmt yuv420p            : required by hardware H.264 decoders
 	//   -g (FPS * SegmentSec)       : force a keyframe cleanly at every HLS segment boundary
-	//   -hls_flags delete_segments  : keep RAM usage flat in tmpfs
+	//   -hls_flags delete_segments  : keep RAM usage flat in tmpfs (stays HLS v3 — no v6 tags)
 	//   +temp_file                  : atomic rename of live.m3u8 so AIMIBO never reads a half-written file
 	gop := p.cfg.FPS * p.cfg.SegmentSec
 	playlistPath := filepath.Join(p.cfg.HLSDir, "live.m3u8")
@@ -202,9 +204,10 @@ func (p *pipeline) ffmpegCmd(ctx context.Context) *exec.Cmd {
 
 	// Video encoder settings
 	args = append(args,
+		"-vsync", "cfr",
 		"-c:v", "libx264",
 		"-preset", "ultrafast",
-		"-tune", "stillimage",
+		"-tune", "zerolatency",
 		"-profile:v", "baseline",
 		"-level", "4.0",
 		"-pix_fmt", "yuv420p",
@@ -225,12 +228,13 @@ func (p *pipeline) ffmpegCmd(ctx context.Context) *exec.Cmd {
 		)
 	}
 
-	// HLS sliding-window muxer settings
+	// HLS sliding-window muxer settings (omit independent_segments so ffmpeg
+	// emits standard #EXT-X-VERSION:3 playlists that AirPlay 1 parses cleanly).
 	args = append(args,
 		"-f", "hls",
 		"-hls_time", strconv.Itoa(p.cfg.SegmentSec),
 		"-hls_list_size", strconv.Itoa(p.cfg.ListSize),
-		"-hls_flags", "delete_segments+independent_segments+temp_file",
+		"-hls_flags", "delete_segments+temp_file",
 		"-hls_segment_filename", segmentPattern,
 		playlistPath,
 	)
