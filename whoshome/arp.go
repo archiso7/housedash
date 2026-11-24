@@ -15,55 +15,91 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/mdlayher/arp"
 )
 
-// Scan opens an ARP socket on ifaceName (e.g. "eth0"), broadcasts ARP requests
-// across its IPv4 subnet every interval, and calls onReply for every ARP reply
-// received from another host on the LAN.
-//
-// Scan blocks until ctx is cancelled or a fatal socket error occurs.
-func Scan(ctx context.Context, ifaceName string, interval time.Duration, onReply func(ip netip.Addr, mac net.HardwareAddr)) error {
-	iface, err := net.InterfaceByName(ifaceName)
+type Device struct {
+	MAC      net.HardwareAddr
+	IP       netip.Addr
+	LastSeen time.Time
+	IsHome   bool
+	Name     string
+}
+
+type Tracker struct {
+	ifaceName string
+	iface     *net.Interface
+	prefix    netip.Prefix
+	client    *arp.Client
+
+	probeAfter time.Duration
+	probeEvery time.Duration
+	awayAfter  time.Duration
+
+	mu      sync.Mutex
+	devices map[string]*Device
+}
+
+func NewTracker(ifaceName string, devices []Device) *Tracker {
+	devMap := make(map[string]*Device, len(devices))
+	for _, d := range devices {
+		dev := d // copy so each map entry has its own struct
+		devMap[dev.MAC.String()] = &dev
+	}
+
+	return &Tracker{
+		ifaceName:  ifaceName,
+		probeAfter: 2 * time.Minute,
+		probeEvery: 1 * time.Minute,
+		awayAfter:  15 * time.Minute,
+		devices:    devMap,
+	}
+}
+
+func (t *Tracker) Run(ctx context.Context) error {
+	iface, err := net.InterfaceByName(t.ifaceName)
 	if err != nil {
-		return fmt.Errorf("lookup interface %q: %w", ifaceName, err)
+		return fmt.Errorf("lookup interface %q: %w", t.ifaceName, err)
 	}
 
 	prefix, err := ipv4Prefix(iface)
 	if err != nil {
-		return fmt.Errorf("interface %q: %w", ifaceName, err)
+		return fmt.Errorf("interface %q: %w", t.ifaceName, err)
 	}
 	log.Printf("[whoshome] scanning %s on %s (local MAC %s)", prefix, iface.Name, iface.HardwareAddr)
 
-	// arp.Dial opens a raw L2 ARP socket bound to iface (requires CAP_NET_RAW on Linux).
 	client, err := arp.Dial(iface)
 	if err != nil {
 		return fmt.Errorf("arp dial %q (did you pass --cap-add NET_RAW?): %w", iface.Name, err)
 	}
 
-	// Closing client when ctx is cancelled unblocks client.Read() in the reader goroutine.
+	t.iface = iface
+	t.prefix = prefix
+	t.client = client
+
 	go func() {
 		<-ctx.Done()
 		_ = client.Close()
 	}()
 	defer client.Close()
 
-	// Listen for incoming ARP replies in the background while we sweep.
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
-		readReplies(ctx, client, iface.HardwareAddr, onReply)
+		t.listen(ctx)
 	}()
 
+	t.probeLoop(ctx)
 	<-readDone
 	return ctx.Err()
 }
 
-func readReplies(ctx context.Context, client *arp.Client, selfMAC net.HardwareAddr, onReply func(netip.Addr, net.HardwareAddr)) {
+func (t *Tracker) listen(ctx context.Context) {
 	for {
-		pkt, _, err := client.Read()
+		pkt, _, err := t.client.Read()
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -72,23 +108,112 @@ func readReplies(ctx context.Context, client *arp.Client, selfMAC net.HardwareAd
 			return
 		}
 
-		// Ignore ARP requests and any packets originating from our own NIC.
-		if bytes.Equal(selfMAC, pkt.SenderHardwareAddr) || pkt.SenderIP.IsUnspecified() {
+		if bytes.Equal(t.iface.HardwareAddr, pkt.SenderHardwareAddr) || pkt.SenderIP.IsUnspecified() {
 			continue
 		}
 
-		if onReply != nil {
-			// Copy the MAC slice so callers can safely store it across reads.
-			mac := make(net.HardwareAddr, len(pkt.SenderHardwareAddr))
-			copy(mac, pkt.SenderHardwareAddr)
-			onReply(pkt.SenderIP, mac)
+		t.markSeen(pkt.SenderHardwareAddr, pkt.SenderIP)
+	}
+}
+
+func (t *Tracker) probeLoop(ctx context.Context) {
+	ticker := time.NewTicker(t.probeEvery)
+	defer ticker.Stop()
+
+	for {
+		t.probeOnce(ctx)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }
 
-// ipv4Prefix returns the first usable non-loopback IPv4 CIDR prefix on iface
-// (for example, 10.52.0.4/24) and refuses masks wider than /16 so we never
-// accidentally sweep millions of addresses.
+func (t *Tracker) probeOnce(ctx context.Context) {
+	toProbe, needDiscovery := t.checkDevices()
+
+	for _, d := range toProbe {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := t.sendUnicastARP(d.MAC, d.IP); err != nil && ctx.Err() == nil {
+			log.Printf("[whoshome] unicast ARP to %s (%s) failed: %v", d.Name, d.IP, err)
+		}
+	}
+
+	if needDiscovery {
+		for _, ip := range subnetHostIPs(t.prefix) {
+			if ctx.Err() != nil {
+				return
+			}
+			if err := t.client.Request(ip); err != nil && ctx.Err() == nil {
+				log.Printf("[whoshome] discovery ARP for %s failed: %v", ip, err)
+				return
+			}
+		}
+	}
+}
+
+func (t *Tracker) checkDevices() (toProbe []Device, needDiscovery bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for _, d := range t.devices {
+		silentFor := time.Since(d.LastSeen)
+
+		if d.IsHome && silentFor > t.awayAfter {
+			d.IsHome = false
+			d.IP = netip.Addr{}
+			log.Printf("[whoshome] %s left (silent for %s)", d.Name, silentFor.Round(time.Second))
+			continue
+		}
+
+		if d.LastSeen.IsZero() || silentFor > t.probeAfter {
+			if d.IP.IsValid() {
+				toProbe = append(toProbe, *d)
+			} else {
+				needDiscovery = true
+			}
+		}
+	}
+	return toProbe, needDiscovery
+}
+
+// sendUnicastARP sends a single Layer 2 unicast ARP request straight to dstMAC
+// asking for dstIP. Unlike broadcast ARP, unicast wakes sleeping Wi-Fi clients
+// via the AP's TIM without flooding the LAN.
+func (t *Tracker) sendUnicastARP(dstMAC net.HardwareAddr, dstIP netip.Addr) error {
+	pkt, err := arp.NewPacket(
+		arp.OperationRequest,
+		t.iface.HardwareAddr,
+		t.prefix.Addr(),
+		dstMAC,
+		dstIP,
+	)
+	if err != nil {
+		return err
+	}
+	return t.client.WriteTo(pkt, dstMAC)
+}
+
+func (t *Tracker) markSeen(mac net.HardwareAddr, ip netip.Addr) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	d, ok := t.devices[mac.String()]
+	if !ok {
+		return // early return still unlocks because of defer
+	}
+	d.LastSeen = time.Now()
+	d.IP = ip
+	if !d.IsHome {
+		d.IsHome = true
+		log.Printf("[whoshome] %s came home (%s)", d.Name, ip)
+	}
+}
+
 func ipv4Prefix(iface *net.Interface) (netip.Prefix, error) {
 	addrs, err := iface.Addrs()
 	if err != nil {
@@ -116,8 +241,6 @@ func ipv4Prefix(iface *net.Interface) (netip.Prefix, error) {
 	return netip.Prefix{}, errors.New("no usable IPv4 address found")
 }
 
-// subnetHostIPs returns every usable host IPv4 address in prefix (skipping the
-// network address at the start and the broadcast address at the end).
 func subnetHostIPs(prefix netip.Prefix) []netip.Addr {
 	masked := prefix.Masked()
 	start := masked.Addr().As4()
