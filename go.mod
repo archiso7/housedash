@@ -2,7 +2,14 @@ module github.com/archiso7/housedash
 
 go 1.25
 
+require github.com/mdlayher/arp v0.0.0-20260923112748-e9ee4960293e
+
 require (
-	github.com/google/gopacket v1.1.19 // indirect
-	golang.org/x/sys v0.0.0-20190412213103-97732733099d // indirect
+	github.com/josharian/native v1.1.0 // indirect
+	github.com/mdlayher/ethernet v0.0.0-20220221185849-529eae5b6118 // indirect
+	github.com/mdlayher/packet v1.1.2 // indirect
+	github.com/mdlayher/socket v0.4.1 // indirect
+	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/sync v0.1.0 // indirect
+	golang.org/x/sys v0.31.0 // indirect
 )

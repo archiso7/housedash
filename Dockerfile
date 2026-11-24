@@ -1,7 +1,7 @@
 # Stage 1: Build the zero-dependency Go binary
 FROM golang:1.25-bookworm AS builder
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY caster/ ./caster/
 COPY cmd/ ./cmd/
 RUN CGO_ENABLED=0 go build -o /out/housedash-caster ./cmd/demo
